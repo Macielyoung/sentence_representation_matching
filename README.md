@@ -40,4 +40,12 @@
 
 构造一个排序式损失函数，即所有正样本对的距离都应该小于负样本对的距离，具体小多少由模型和数据决定，没有一个绝对关系。
 
-参考：https://spaces.ac.cn/archives/8847
+损失函数：
+
+![cosent_loss](pics/cosent_loss.svg)
+
+参考：
+
+1）https://spaces.ac.cn/archives/8847
+
+2）https://github.com/shawroad/CoSENT_Pytorch
