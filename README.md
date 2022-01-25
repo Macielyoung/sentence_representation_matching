@@ -34,6 +34,10 @@
 
 使用双塔式来微调Bert，MSE损失函数来拟合文本之间的cosine相似度。
 
+模型结构：
+
+![SBERT Siamese Network Architecture](pics/sbert.png)
+
 参考：https://www.sbert.net/docs/training/overview.html
 
 #### 2. CoSent
