@@ -10,6 +10,14 @@
 
 利用Transformer Dropout机制，使用两次作为正样本对比，以此来拉近正样本，推开负样本。
 
+模型结构：
+
+![simcse](pics/simcse.png)
+
+损失函数：
+
+![simcse_loss](pics/simcse_loss.svg)
+
 参考：
 
 1）https://github.com/princeton-nlp/SimCSE
