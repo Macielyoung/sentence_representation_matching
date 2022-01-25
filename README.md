@@ -20,6 +20,10 @@
 
 在SimCSE的基础上，通过重复句子中部分词组来构造正样本，同时引入动量对比来增加负样本。
 
+模型结构：
+
+![esimcse](pics/esimcse.png)
+
 参考：https://arxiv.org/pdf/2109.04380.pdf
 
 #### 3. PromptBert
