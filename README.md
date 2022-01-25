@@ -2,6 +2,8 @@
 
 该项目主要是文本匹配相关模型，包含使用SimCSE、ESimCSE、PromptBert三种无监督文本匹配模型和SBert、CoSent两种有监督文本匹配模型。
 
+
+
 ### 无监督文本匹配
 
 #### 1. SimCSE
@@ -24,13 +26,31 @@
 
 ![esimcse](pics/esimcse.png)
 
+损失函数：
+
+![esimcse_loss](pics/esimcse_loss.svg)
+
 参考：https://arxiv.org/pdf/2109.04380.pdf
 
 #### 3. PromptBert
 
 使用Prompt方式来表征语义向量，通过不同模板产生的语义向量构造正样本，同一批次中的其他样本作为负样本。
 
+损失函数：
+
+![promptbert_loss](pics/promptbert_loss.svg)
+
+```
+本实验使用两个句子模板：
+1）"[X]"，它的意思是[MASK]。
+2）"[X]"，这句话的意思是[MASK]。
+
+在计算损失函数时为了消除Prompt模板影响，通过替换模板后的句子[MASK]获取的表征减去模板中[MASK]获取的表征来得到句子向量表征。
+```
+
 参考：https://arxiv.org/pdf/2201.04337.pdf
+
+
 
 ### 有监督文本匹配
 
