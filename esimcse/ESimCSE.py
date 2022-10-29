@@ -3,17 +3,17 @@
 # @Author  : Maciel
 
 import torch.nn as nn
-from transformers import BertConfig, BertModel
+from transformers import AutoConfig, AutoModel
 import torch
 
 
-class SimCSE(nn.Module):
+class ESimCSE(nn.Module):
     def __init__(self, pretrained="hfl/chinese-bert-wwm-ext", pool_type="cls", dropout_prob=0.3):
         super().__init__()
-        conf = BertConfig.from_pretrained(pretrained)
+        conf = AutoConfig.from_pretrained(pretrained)
         conf.attention_probs_dropout_prob = dropout_prob
         conf.hidden_dropout_prob = dropout_prob
-        self.encoder = BertModel.from_pretrained(pretrained, config=conf)
+        self.encoder = AutoModel.from_pretrained(pretrained, config=conf)
         assert pool_type in ["cls", "pooler", "avg_first_last", "avg_last_two"], "invalid pool_type: %s" % pool_type
         self.pool_type = pool_type
 

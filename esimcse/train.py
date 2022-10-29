@@ -1,13 +1,47 @@
-import copy
-import torch
-from torch.utils.data import DataLoader
+# -*- coding: utf-8 -*-
+# @Time    : 2022/9/20
+# @Author  : Maciel
+
+
+from transformers import AutoTokenizer
 import numpy as np
-from tqdm import tqdm
-from loading import DataLoading
-from config import Params
-from model import ESimCSE
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import scipy.stats
+from loading import MatchingDataSet
+from ESimCSE import ESimCSE
+import random
+import argparse
+from loguru import logger
+import copy
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--trainfile", type=str, default="../dataset/STS-B/train.txt", help="train file path")
+    parser.add_argument("--devfile", type=str, default="../dataset/STS-B/dev.txt", help="dev file path")
+    parser.add_argument("--testfile", type=str, default="../dataset/STS-B/test.txt", help="test file path")
+    parser.add_argument("--filetype", type=str, default="txt", help="train and dev file type")
+    parser.add_argument("--pretrained", type=str, default="hfl/chinese-roberta-wwm-ext", help="huggingface pretrained model")
+    parser.add_argument("--model_out", type=str, default="../models/esimcse_roberta_stsb.pth", help="model output path")
+    parser.add_argument("--dup_rate", type=float, default=0.2, help="repeat word probability")
+    parser.add_argument("--queue_size", type=int, default=0.5, help="negative queue num / batch size")
+    parser.add_argument("--momentum", type=float, default=0.995, help="momentum parameter")
+    parser.add_argument("--max_length", type=int, default=128, help="sentence max length")
+    parser.add_argument("--batch_size", type=int, default=64, help="batch size")
+    parser.add_argument("--epochs", type=int, default=10, help="epochs")
+    parser.add_argument("--lr", type=float, default=3e-5, help="learning rate")
+    parser.add_argument("--tao", type=float, default=0.05, help="temperature")
+    parser.add_argument("--device", type=str, default="cuda", help="device")
+    parser.add_argument("--display_interval", type=int, default=100, help="display interval")
+    parser.add_argument("--pool_type", type=str, default="avg_first_last", help="pool_type")
+    parser.add_argument("--dropout_rate", type=float, default=0.3, help="dropout_rate")
+    parser.add_argument("--task", type=str, default="esimcse", help="task name")
+    args = parser.parse_args()
+    return args
 
 
 def compute_loss(query, key, queue, tao=0.05):
@@ -39,138 +73,200 @@ def compute_loss(query, key, queue, tao=0.05):
     return loss
 
 
-def construct_queue(train_question_dl, tokenizer, key_encoder, device):
+def construct_queue(args, train_loader, tokenizer, key_encoder):
     flag = 0
+    queue_num = int(args.queue_size * args.batch_size)
     queue = None
     while True:
         with torch.no_grad():
-            for pid, pair in enumerate(train_question_dl):
+            for pid, data in enumerate(train_loader):
                 # 和初始数据不同的数据作为反例
-                if pid < 1000:
+                if pid < 10:
                     continue
-                key_question = list(pair[1])
-                key_encodings = tokenizer(key_question,
-                                          padding=True,
-                                          truncation=True,
-                                          max_length=Params.max_length,
-                                          return_tensors='pt')
-                key_embedding = key_encoder(key_encodings['input_ids'].to(device),
-                                            key_encodings['attention_mask'].to(device),
-                                            key_encodings['token_type_ids'].to(device))
+                query_encodings = tokenizer(data,
+                                            padding=True,
+                                            truncation=True,
+                                            max_length=args.max_length,
+                                            return_tensors='pt')
+                query_encodings = {key: value.to(args.device) for key, value in query_encodings.items()}
+                query_embedding = key_encoder(**query_encodings)
                 if queue is None:
-                    queue = key_embedding
+                    queue = query_embedding
                 else:
-                    if queue.shape[0] < Params.queue_num:
-                        queue = torch.cat((queue, key_embedding), 0)
+                    if queue.shape[0] < queue_num:
+                        queue = torch.cat((queue, query_embedding), 0)
                     else:
                         flag = 1
                 if flag == 1:
                     break
         if flag == 1:
             break
-    queue = queue[:Params.queue_num]
+    queue = queue[-queue_num:]
     queue = torch.div(queue, torch.norm(queue, dim=1).reshape(-1, 1))
     return queue
     
 
-def train():
-    data_loading = DataLoading(Params.question_file, Params.qa_file, Params.pretrained_model)
-    questions = data_loading.load_data()
-    print("load dataset done, data num: {}!".format(len(questions)))
-    pos_question_pairs = data_loading.generate_pos_dataset2(questions)
-    print("data augmentation done!")
-    train_question_dl = DataLoader(pos_question_pairs,
-                                   batch_size=Params.batch_size,
-                                   shuffle=True)
-    batches_num = len(train_question_dl)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    query_encoder = ESimCSE(Params.pretrained_model, Params.dropout)
-    key_encoder = copy.deepcopy(query_encoder)
-    query_encoder = query_encoder.to(device)
-    query_encoder.train()
-    key_encoder = key_encoder.to(device)
-    key_encoder.eval()
-    optimizer = torch.optim.AdamW(query_encoder.parameters(), lr=Params.lr)
+def repeat_word(tokenizer, sentence, dup_rate):
+    '''
+    @function: 重复句子中的部分token
     
-    best_loss = 100000
-    queue_embeddings = construct_queue(train_question_dl, data_loading.tokenizer, key_encoder, device)
-    print("create negative queue done!", flush=True)
-    print("start training...", flush=True)
-    for epoch in range(Params.epoches):
-        epoch_loss = []
-        batch = 0
-        for pairs in tqdm(train_question_dl):
-            query, key = list(pairs[0]), list(pairs[1])
-            query_encodings = data_loading.tokenizer(query,
-                                                     padding=True,
-                                                     truncation=True,
-                                                     max_length=Params.max_length,
-                                                     return_tensors='pt')
-            query_embeddings = query_encoder(query_encodings['input_ids'].to(device),
-                                             query_encodings['attention_mask'].to(device),
-                                             query_encodings['token_type_ids'].to(device))
+    @input:
+    sentence: string，输入语句
+    
+    @return:
+    dup_sentence: string，重复token后生成的句子
+    '''
+    word_tokens = tokenizer.tokenize(sentence)
+    
+    # dup_len ∈ [0, max(2, int(dup_rate ∗ N))]
+    max_len = max(2, int(dup_rate * len(word_tokens)))
+    # 防止随机挑选的数值大于token数量
+    dup_len = min(random.choice(range(max_len+1)), len(word_tokens))
+    
+    random_indices = random.sample(range(len(word_tokens)), dup_len)
+    # print(max_len, dup_len, random_indices)
+    
+    dup_word_tokens = []
+    for index, word in enumerate(word_tokens):
+        dup_word_tokens.append(word)
+        if index in random_indices and "#" not in word:
+            dup_word_tokens.append(word)
+    dup_sentence = tokenizer.decode(tokenizer.convert_tokens_to_ids(dup_word_tokens)).replace(" ", "")
+    # dup_sentence = "".join(dup_word_tokens)
+    return dup_sentence
+
+
+def eval(model, tokenizer, dev_loader, args):
+    model.eval()
+    model.to(args.device)
+    
+    all_sims, all_scores = [], []
+    with torch.no_grad():
+        for data in dev_loader:
+            sent1 = data['sent1']
+            sent2 = data['sent2']
+            score = data['score']
+            sent1_encoding = tokenizer(sent1,
+                                       padding=True,
+                                       truncation=True,
+                                       max_length=args.max_length,
+                                       return_tensors='pt')
+            sent1_encoding = {key: value.to(args.device)  for key, value in sent1_encoding.items()}
+            sent2_encoding = tokenizer(sent2,
+                                       padding=True,
+                                       truncation=True,
+                                       max_length=args.max_length,
+                                       return_tensors='pt')
+            sent2_encoding = {key: value.to(args.device)  for key, value in sent2_encoding.items()}
             
-            key_encodings = data_loading.tokenizer(key,
-                                                   padding=True,
-                                                   truncation=True,
-                                                   max_length=Params.max_length,
-                                                   return_tensors='pt')
-            key_embeddings = key_encoder(key_encodings['input_ids'].to(device),
-                                         key_encodings['attention_mask'].to(device),
-                                         key_encodings['token_type_ids'].to(device)).detach()
-            
-            # normalize sentence embedding
-            query_embeddings = torch.div(query_embeddings, torch.norm(query_embeddings, dim=1).reshape(-1, 1))
-            key_embeddings = torch.div(key_embeddings, torch.norm(key_embeddings, dim=1).reshape(-1, 1))
-            
-            # compute loss
-            loss = compute_loss(query_embeddings, key_embeddings, queue_embeddings, Params.tao)
-            epoch_loss.append(loss.item())
-            
-            # update gradient
+            sent1_output = model(**sent1_encoding)
+            sent2_output = model(**sent2_encoding)
+            sim_score = F.cosine_similarity(sent1_output, sent2_output).cpu().tolist()
+            all_sims += sim_score
+            all_scores += score.tolist()
+    corr = scipy.stats.spearmanr(all_sims, all_scores).correlation
+    return corr
+
+
+def train(args):
+    train_file = args.trainfile
+    dev_file = args.devfile
+    test_file = args.testfile
+    file_type = args.filetype
+    queue_num = int(args.queue_size * args.batch_size)
+    match_dataset = MatchingDataSet()
+    train_list = match_dataset.read_train_file(train_file, dev_file, test_file, file_type)
+    dev_list = match_dataset.read_eval_file(dev_file, file_type)
+    logger.info("train samples num: {}, dev samples num: {}".format(len(train_list), len(dev_list)))
+
+    train_loader = DataLoader(train_list,
+                              batch_size=args.batch_size,
+                              shuffle=True)
+    dev_loader = DataLoader(dev_list,
+                            batch_size=args.batch_size)
+    logger.info("train batch num: {}, dev batch num: {}".format(len(train_loader), len(dev_loader)))
+    
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
+    query_encoder = ESimCSE(args.pretrained, args.pool_type, args.dropout_rate)
+    key_encoder = copy.deepcopy(query_encoder)
+    query_encoder.train()
+    query_encoder.to(args.device)
+    key_encoder.eval()
+    key_encoder.to(args.device)
+    
+    optimizer = torch.optim.AdamW(query_encoder.parameters(), lr=args.lr)
+    # 构造反例样本队列
+    queue_embeddings = construct_queue(args, train_loader, tokenizer, key_encoder)
+    
+    batch_idx = 0
+    best_corr = 0
+    best_loss = 1000000
+    for epoch in range(args.epochs):
+        epoch_losses = []
+        for data in train_loader:
             optimizer.zero_grad()
-            loss.backward()
+            # 构造正例样本
+            key_data = [repeat_word(tokenizer, sentence, args.dup_rate) for sentence in data]
+
+            query_encodings = tokenizer(data,
+                                        padding=True,
+                                        truncation=True,
+                                        max_length=args.max_length,
+                                        return_tensors='pt')
+            query_encodings = {key: value.to(args.device) for key, value in query_encodings.items()}
+            key_encodings = tokenizer(key_data,
+                                      padding=True,
+                                      truncation=True,
+                                      max_length=args.max_length,
+                                      return_tensors='pt')
+            key_encodings = {key: value.to(args.device) for key, value in key_encodings.items()}
+            
+            query_embeddings = query_encoder(**query_encodings)
+            key_embeddings = key_encoder(**key_encodings).detach()
+            
+            # 对表征进行归一化，便于后面相似度计算
+            query_embeddings = F.normalize(query_embeddings, dim=1)
+            key_embeddings = F.normalize(key_embeddings, dim=1)
+            
+            batch_loss = compute_loss(query_embeddings, key_embeddings, queue_embeddings, args.tao)
+            epoch_losses.append(batch_loss.item())
+            # print(batch_idx, batch_loss.item())
+            
+            batch_loss.backward()
             optimizer.step()
             
-            # update queue
+            # 更新队列中负样本表征
+            # queue_embeddings = torch.cat((queue_embeddings, query_embeddings.detach()), 0)
             queue_embeddings = torch.cat((queue_embeddings, key_embeddings), 0)
-            if queue_embeddings.shape[0] > Params.queue_num:
-                queue_embeddings = queue_embeddings[Params.batch_size:, :]
+            queue_embeddings = queue_embeddings[-queue_num:, :]
             
-            # update key encoder momentum 
+            # 更新key编码器的动量
             for query_params, key_params in zip(query_encoder.parameters(), key_encoder.parameters()):
-                key_params.data.copy_(Params.momentum * key_params + (1-Params.momentum) * query_params)
+                key_params.data.copy_(args.momentum * key_params + (1-args.momentum) * query_params)
                 key_params.requires_grad = False
-             
-            if batch % Params.display_interval == 0:
-                print("Epoch: {}, batch: {}/{}, loss: {}".format(epoch, batch, batches_num, loss.item()), flush=True)
-            batch += 1
-        
-        avg_epoch_loss = np.mean(epoch_loss)
-        print("Epoch: {}, avg loss: {}".format(epoch, avg_epoch_loss), flush=True)
-        if avg_epoch_loss < best_loss:
-            print("Epoch: {}, loss: {}, save best model".format(epoch, avg_epoch_loss), flush=True)
-            model_path = Params.esimcse_model + "_{}_{}.pth".format(Params.dropout, Params.queue_num)
+                
+            if batch_idx % args.display_interval == 0:
+                logger.info("Epoch: {}, batch: {}, loss: {}".format(epoch, batch_idx, batch_loss.item()))
+            batch_idx += 1
+            
+        avg_epoch_loss = np.mean(epoch_losses)
+        dev_corr = eval(query_encoder, tokenizer, dev_loader, args)
+        logger.info("epoch: {}, avg loss: {}, dev corr: {}".format(epoch, avg_epoch_loss, dev_corr))
+        # if avg_epoch_loss <= best_loss and dev_corr >= best_corr:
+        if dev_corr >= best_corr:
+            best_corr = dev_corr
             best_loss = avg_epoch_loss
             torch.save({
                 'epoch': epoch,
-                'loss': avg_epoch_loss,
-                'model_state_dict': query_encoder.state_dict()
-            }, model_path)
-
-    
-train()
-
-# query= torch.randn([3, 4])
-# key = torch.randn([3, 4])
-
-# query= torch.div(query, torch.norm(query, dim=1).reshape(-1,1))
-# key = torch.div(key, torch.norm(key, dim=1).reshape(-1,1))
-
-# queue = torch.randn([10, 4])
-# loss1 = compute_loss(query, key, queue)
-
-# queue = torch.div(queue, torch.norm(queue, dim=1).reshape(-1,1))
-# loss2 = compute_loss(query, key, queue)
-# print(loss1, loss2)
+                'batch': batch_idx,
+                'model_state_dict': query_encoder.state_dict(),
+                'loss': best_loss,
+                'corr': best_corr
+            }, args.model_out)
+            logger.info("epoch: {}, batch: {}, best loss: {}, best corr: {}, save model".format(epoch, batch_idx, avg_epoch_loss, dev_corr))
+            
+        
+if __name__ == "__main__":
+    args = parse_args()
+    logger.info("args: {}".format(args))
+    train(args)
